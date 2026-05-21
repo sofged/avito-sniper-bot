@@ -12,7 +12,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 # ==========================================
 PRICE_MIN = 7000          
 PRICE_MAX = 14000         
-MAX_PAGES  = 20           
+MAX_PAGES  = 50           
 OUTPUT_FILE = "avito_results.xlsx" 
 USER_CITY = "ростов-на-дону"
 
@@ -40,7 +40,6 @@ SEARCH_QUERIES = [
     "google pixel",
     "oneplus",
 ]
-
 BASE_URL = "https://www.avito.ru/rossiya/telefony/smartfony-ASgBAgICAUSSA8YQ"
 
 def make_url(query: str, page: int = 1) -> str:
@@ -124,15 +123,38 @@ async def fetch_description(page, url: str) -> dict:
 
 async def parse_page(page, url: str, context) -> list[dict]:
     """Сканирует общую страницу поиска, собирает карточки товаров и делает первичный фильтр."""
-    await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-    await asyncio.sleep(3)
+    try:
+        # Смягчаем условия загрузки: domcontentloaded быстрее, чем load
+        await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+        
+        # Пытаемся дождаться networkidle, но не падаем, если оно не случилось
+        try:
+            await page.wait_for_load_state("networkidle", timeout=10_000)
+        except Exception:
+            pass # Игнорируем таймаут ожидания сети, если DOM уже готов
+            
+        await asyncio.sleep(2)
+        
+        # Проверка: не перебросило ли нас на другую страницу
+        current_url = page.url
+        if "p=" in url and "p=" not in current_url and page.url != url:
+            if "/rossiya" in current_url:
+                 print(f"  ⚠ Авито сбросил пагинацию (перенаправил на {current_url})")
+    except Exception as e:
+        print(f"  ⚠ Ошибка при загрузке {url}: {e}")
+        # Если загрузка совсем упала, возвращаем пустой список
+        return []
 
-    if await is_captcha_page(page): return []
+    if await is_captcha_page(page):
+        print("  ⚠ Обнаружена капча!")
+        return []
 
     try:
-        await page.wait_for_selector('[data-marker="item"]', timeout=15_000)
-    except:
-        return [] 
+        # Проверяем наличие карточек. Если они есть — работаем, даже если страница не «догрузилась» до конца
+        await page.wait_for_selector('[data-marker="item"]', timeout=10_000)
+    except Exception:
+        # Если карточек нет совсем — значит либо конец, либо блок
+        return []
 
     cards = await page.query_selector_all('[data-marker="item"]')
     items = []
@@ -141,7 +163,8 @@ async def parse_page(page, url: str, context) -> list[dict]:
         try:
             # Извлекаем базовые данные с карточки (название, цена, город, ссылка)
             title_el = await card.query_selector('[itemprop="name"]') or await card.query_selector('[data-marker="item-title"]')
-            title = (await title_el.inner_text()).strip() if title_el else ""
+            if not title_el: continue
+            title = (await title_el.inner_text()).strip()
 
             price_el = await card.query_selector('[itemprop="price"]')
             price = int(await price_el.get_attribute("content") or 0) if price_el else 0
@@ -151,10 +174,15 @@ async def parse_page(page, url: str, context) -> list[dict]:
             url_item = f"https://www.avito.ru{href}" if href and href.startswith("/") else href
 
             geo_el = await card.query_selector('[data-marker="item-address"]')
-            city = (await geo_el.inner_text()).strip().split(",")[0].strip() if geo_el else ""
+            city = ""
+            if geo_el:
+                try:
+                    city_text = await geo_el.inner_text()
+                    city = city_text.strip().split(",")[0].strip()
+                except Exception:
+                    pass
 
             # --- ПЕРВИЧНЫЙ ФИЛЬТР ---
-            # Отсекаем мусор и запчасти по названию
             STOP_WORDS = [
                 "чехол", "коробка", "аккумулятор", "акб", "дисплей", "экран", "стекло", "камера",
                 "плата", "запчасти", "на запчасти", "шлейф", "корпус", "динамик", "зарядка", 
@@ -167,10 +195,9 @@ async def parse_page(page, url: str, context) -> list[dict]:
             # Строгий фильтр по нужным моделям телефонов
             is_valid_model = False
             
-            # 1. Nothing Phone (Ловит слитное и раздельное написание)
+            # 1. Nothing Phone
             if "nothing" in title_lower or "phone" in title_lower:
                 if " 1 " in title_lower or "cmf" in title_lower: pass 
-                # \s* позволяет пропускать пробелы внутри моделей: "2a" == "2 a"
                 elif re.search(r'(nothing|phone)\s*\(?(2|2\s*a|2\s*pro|2pro|3|3\s*a|3\s*pro|3pro|4\s*a|4\s*pro|4pro)\b', title_lower):
                     is_valid_model = True
             
@@ -179,7 +206,7 @@ async def parse_page(page, url: str, context) -> list[dict]:
                 if re.search(r'(pixel|пиксель)\s*(8|9|9\s*pro|9pro|9\s*a|9a)\b', title_lower):
                     is_valid_model = True
             
-            # 3. Motorola (Добавил \s* во все модели)
+            # 3. Motorola
             elif any(brand in title_lower for brand in ["motorola", "moto", "моторола"]):
                 allowed_moto = [
                     r"edge\s*30\s*pro", r"edge\s*x30", r"edge\s*40", r"\bx\s*40\b", r"\bs\s*30\b", 
@@ -188,16 +215,14 @@ async def parse_page(page, url: str, context) -> list[dict]:
                 if any(re.search(m, title_lower) for m in allowed_moto):
                     is_valid_model = True
 
-            # 4. OnePlus (Добавил \s* для Nord, Ace и моделей)
+            # 4. OnePlus
             elif "oneplus" in title_lower or "ванплас" in title_lower:
-                # Замени в функции parse_page:
                 op_regex = r'(oneplus|ванплас)\s+(11\s*r|12|12\s*r|nord\s*3|nord\s*4|nord\s*5|ace\s*2|ace\s*2\s*pro|ace\s*2\s*v|ace\s*3|ace\s*3\s*v|ace\s*3\s*pro|nord\s*ce\s*3)\b'
                 if re.search(op_regex, title_lower):
                     is_valid_model = True
             
             if not is_valid_model: continue
 
-            # Добавляем в список только подходящие по цене варианты
             if price and (PRICE_MIN <= price <= PRICE_MAX):
                 items.append({"title": title, "price": price, "city": city, "url": url_item})
 
@@ -245,21 +270,25 @@ def save_to_excel(data: list[dict], filename: str):
         if len(desc) > 300: desc = desc[:297] + "..." 
         
         # --- ФОРМАТИРОВАНИЕ РЕЙТИНГА И ДАТЫ РЕГИСТРАЦИИ ---
-        rating_text = f"{item['rating']} ({item['reviews']} отз.)"
+        rating_text = f"{item.get('rating', 0.0)} ({item.get('reviews', 0)} отз.)"
         rating_color = None
         
-        if item['reviews'] == 0:
-            if item['reg_year'] == 0:
+        reviews = item.get('reviews', 0)
+        reg_year = item.get('reg_year', 0)
+        
+        if reviews == 0:
+            if reg_year == 0:
                 rating_text = "⚠ Нет отзывов"
-            elif item['reg_year'] >= 2024:
-                rating_text = f"⚠ Опасно (Свежий акк {item['reg_year']})"
+            elif reg_year >= 2024:
+                rating_text = f"⚠ Опасно (Свежий акк {reg_year})"
                 rating_color = RED
             else:
-                rating_text = f"Без отзывов (С {item['reg_year']} г.)"
-                rating_color = "FEF08A" # Желтый/Оранжевый (старый аккаунт, но без отзывов)
+                rating_text = f"Без отзывов (С {reg_year} г.)"
+                rating_color = "FEF08A"
 
-        row_data = [idx, item["score"], item["title"], item["price"], item["city"], rating_text, 
-                    item["battery"], item["kit"], item["condition"], item["screen"], desc, item["url"]]
+        row_data = [idx, item.get("score", 0), item.get("title", ""), item.get("price", 0), item.get("city", ""), rating_text, 
+                    item.get("battery", "—"), item.get("kit", "❓ Уточнить"), item.get("condition", "Не указано"), 
+                    item.get("screen", "Не указано"), desc, item.get("url", "")]
 
         for col, value in enumerate(row_data, 1):
             cell = ws.cell(row=row_num, column=col, value=value)
@@ -268,26 +297,27 @@ def save_to_excel(data: list[dict], filename: str):
             cell.border = border
             if idx % 2 == 0: cell.fill = PatternFill(start_color=LIGHT_ROW, end_color=LIGHT_ROW, fill_type="solid")
 
-        # Раскраска Оценки (зеленый для топов)
+        # Раскраска Оценки
+        score = item.get("score", 0)
         score_cell = ws.cell(row=row_num, column=2)
-        score_cell.font = Font(bold=True, size=12, color="FFFFFF" if item["score"] >= 5 else TEXT_DARK)
-        score_cell.fill = PatternFill(start_color="10B981" if item["score"] >= 5 else "D1D5DB", fill_type="solid")
+        score_cell.font = Font(bold=True, size=12, color="FFFFFF" if score >= 5 else TEXT_DARK)
+        score_cell.fill = PatternFill(start_color="10B981" if score >= 5 else "D1D5DB", fill_type="solid")
         score_cell.alignment = Alignment(horizontal="center", vertical="center")
 
         ws.cell(row=row_num, column=4).font = Font(bold=True, color="065F46")
         ws.cell(row=row_num, column=4).number_format = '#,##0 ₽'
         ws.cell(row=row_num, column=7).alignment = Alignment(horizontal="center", vertical="center") 
         
-        if item["kit"] == "✅ Полный":
+        if item.get("kit") == "✅ Полный":
             ws.cell(row=row_num, column=8).font = Font(color="059669", bold=True)
             
-        # Раскраска рейтинга (красный/желтый)
+        # Раскраска рейтинга
         if rating_color:
             ws.cell(row=row_num, column=6).fill = PatternFill(start_color=rating_color, end_color=rating_color, fill_type="solid")
             if rating_color == RED: ws.cell(row=row_num, column=6).font = Font(color="B91C1C", bold=True)
 
         url_cell = ws.cell(row=row_num, column=12)
-        url_cell.hyperlink = item["url"]
+        url_cell.hyperlink = item.get("url", "")
         url_cell.font = Font(color="4F46E5", underline="single")
         url_cell.value = "Открыть"
 
@@ -304,273 +334,168 @@ def save_to_excel(data: list[dict], filename: str):
 # 🚀 ГЛАВНЫЙ АЛГОРИТМ ПАРСЕРА
 # ==========================================
 async def main():
-    all_items = []
-    print("🚀 Запуск парсера: СНАЙПЕРСКИЙ РЕЖИМ (С ОЦЕНКАМИ)")
+    try:
+        all_items = []
+        print("🚀 Запуск парсера: СНАЙПЕРСКИЙ РЕЖИМ (С ОЦЕНКАМИ)")
 
-    # Load cache
-    cache = load_cache()
-    cached_used = 0
-    new_added = 0
+        # Load cache
+        cache = load_cache()
+        cached_used = 0
+        new_added = 0
 
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled"])
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            locale="ru-RU", viewport={"width": 1366, "height": 900})
-        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
-        page = await context.new_page()
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled"])
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                locale="ru-RU", viewport={"width": 1366, "height": 900})
+            await context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
+            page = await context.new_page()
 
-        # --- ЭТАП 1: СБОР ССЫЛОК СО СТРАНИЦ ПОИСКА ---
-        for query in SEARCH_QUERIES:
-            print(f"\n🔍 Поиск: «{query}»")
-            empty_attempts = 0
+            # --- ЭТАП 1: СБОР ССЫЛОК СО СТРАНИЦ ПОИСКА ---
+            for query in SEARCH_QUERIES:
+                print(f"\n🔍 Поиск: «{query}»")
+                empty_attempts = 0
+                
+                for page_num in range(1, MAX_PAGES + 1):
+                    try:
+                        url = make_url(query, page_num)
+                        print(f"  Страница {page_num}... ", end="", flush=True)
+                        
+                        items = await parse_page(page, url, context)
+                        print(f"Найдено: {len(items)}")
+                        
+                        if not items:
+                            empty_attempts += 1
+                            if empty_attempts >= 3:
+                                print("  🛑 Пустые страницы, переходим к следующему запросу.")
+                                break
+                        else:
+                            all_items.extend(items)
+                            empty_attempts = 0
+
+                        await asyncio.sleep(4) # Пауза между страницами
+                    except Exception as e:
+                        print(f"  ⚠ Сбой на странице {page_num}: {e}")
+                        continue
             
-            for page_num in range(1, MAX_PAGES + 1):
-                url = make_url(query, page_num)
-                print(f"  Страница {page_num}... ", end="", flush=True)
-                items = await parse_page(page, url, context)
-                print(f"Найдено: {len(items)}")
-                
-                if len(items) == 0:
-                    empty_attempts += 1
-                    if empty_attempts >= 2:
-                        print("  🛑 Пустые страницы, идем дальше.")
-                        break
-                else:
-                    all_items.extend(items)
-                    empty_attempts = 0
-                
-                await asyncio.sleep(3)
-        
-        # --- ЭТАП 2: Анализ каждого объявления ---
-        filtered_items = []
-        # Deduplicate items by URL
-        seen = set()
-        unique_items = []
-        for it in all_items:
-            if it["url"] not in seen:
-                seen.add(it["url"])                
-                unique_items.append(it)
-        
-        if unique_items:
-            print("📝 Анализ: Скрытые дефекты, Доставка, Комплект, Рейтинг...")
-            for idx, item in enumerate(unique_items, 1):
-                url = item["url"]
-                if url in cache:
-                    # Use cached data
-                    cached_item = cache[url]
-                    item.update(cached_item)
-                    cached_used += 1
-                    print(f"  [{idx}/{len(unique_items)}] {item['title'][:20]}... (cached)")
-                else:
-                    print(f"  [{idx}/{len(unique_items)}] {item['title'][:20]}... ", end="", flush=True)
-                    details = await fetch_description(page, url)
-                    item.update(details)
-                    
-                    desc_lower = item["description"].lower()
-                    title_lower = item["title"].lower()
-                    
-                    # 🛑 Фильтр скрытых проблем (скам и блокировки)
-                    stop_issues = [
-                        "mdm", "мдм", "soft unlock", "софт анлок", "операторский", "демо", "demo", "att", "verizon",
-                        "вскрывался", "ремонтировался", "заменен", "менялся", "не работает отпечаток", "отвал",
-                        "мерцает", "заблокирован", "icloud", "гугл аккаунт", "google аккаунт", "пятн", "требуется ремонт"
-                    ]
-                    if any(bad in desc_lower for bad in stop_issues):
-                        print("✕ (Отбраковано: Скрытый дефект/Блокировка)")
-                        continue
-                    # Дополнительная проверка: исключаем объявления с пометкой "Только обмен"
-                    if "только обмен" in desc_lower:
-                        print("✕ (Отбраковано: Только обмен)")
-                        continue
-
-                    # 🛑 Фильтр доставки (Только Ростов)
-                    no_delivery = ["без доставки", "доставки нет", "авито доставки нет", "не отправляю", "только личная встреча", "не отправлю", "без пересыла"]
-                    if any(word in desc_lower for word in no_delivery):
-                        if USER_CITY not in item["city"].lower():
-                            print("✕ (Отбраковано: Нет доставки, другой город)")
-                            continue
-
-                    # 🛑 Фильтр убитого состояния
-                    cond_lower = item["condition"].lower()
-                    scr_lower = item["screen"].lower()
-                    if cond_lower != "не указано" and not any(good in cond_lower for good in ["отлично", "хороше", "ново"]):
-                        print("✕ (Убитое состояние)")
-                        continue
-                    if scr_lower != "не указано" and not any(good in scr_lower for good in ["без дефект", "1-2", "1–2", "царапин"]):
-                        print("✕ (Разбитый экран)")
-                        continue
-
-                    # 🛑 Фильтр рейтинга (менее 4.0)
-                    if item["rating"] > 0 and item["rating"] < 4.0:
-                        print("✕ (Плохой продавец, рейтинг ниже 4.0)")
-                        continue
-
-                    # 🎁 Анализ комплекта
-                    if re.search(r'полный комплект|коробка|родная зарядка|ориг\\w* блок', desc_lower):
-                        item["kit"] = "✅ Полный"
-                    else:
-                        item["kit"] = "❓ Уточнить"
-
-                    # 🏆 Расчет умной оценки (Скоринг)
-                    score = 0
-                    if item["condition"] == "Отличное" and item["screen"] == "Без дефектов":
-                        score += 3
-                    if item["kit"] == "✅ Полный":
-                        score += 2
-                    
-                    # ДЖЕКПОТЫ (+5 баллов)
-                    jackpots = [
-                        r'(nothing|phone)\s*(4\s*a|4\s*pro)\b',
-                        r'(pixel|пиксель)\\s*(9\\s*pro|9pro)\\b',
-                        r'(edge 60|s60|edge 70)',
-                        r'(oneplus|ванплас)\\s+(12|12r|nord 4|nord 5|ace 3 pro)\\b'
-                    ]
-                    if any(re.search(j, title_lower) for j in jackpots):
-                        score += 5
-                    
-                    item["score"] = score
-                    print(f"✅ Оценка: {score} | АКБ: {item['battery']}")
-                    filtered_items.append(item)
-                    cache[url] = item.copy()
-                    new_added += 1
-                    await asyncio.sleep(3)
-        
-        await browser.close()
-    
-    # Prune stale cache entries (remove URLs no longer present)
-    current_urls = {it["url"] for it in all_items}
-    stale_keys = [k for k in list(cache.keys()) if k not in current_urls]
-    for k in stale_keys:
-        del cache[k]
-    
-    save_cache(cache)
-    print(f"🗂️ Кешировано объявлений: {len(cache)} (использовано {cached_used}, новые {new_added})")
-
-    # Финальная сортировка и сохранение
-    if filtered_items:
-        filtered_items.sort(key=lambda x: (-x["score"], x["price"]))
-        total = save_to_excel(filtered_items, OUTPUT_FILE)
-        print(f"\n✨ Готово! В {OUTPUT_FILE} сохранено {total} топовых предложений.")
-    else:
-        print("\n⚠ Ничего не найдено.")
-
-
-
-
-    
-
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled"])
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            locale="ru-RU", viewport={"width": 1366, "height": 900})
-        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
-        page = await context.new_page()
-
-        # --- ЭТАП 1: СБОР ССЫЛОК СО СТРАНИЦ ПОИСКА ---
-        for query in SEARCH_QUERIES:
-            print(f"\n🔍 Поиск: «{query}»")
-            empty_attempts = 0 # Счетчик пустых страниц
+            # Deduplicate items by URL
+            seen = set()
+            unique_items = []
+            for it in all_items:
+                if it["url"] not in seen:
+                    seen.add(it["url"])                
+                    unique_items.append(it)
             
-            for page_num in range(1, MAX_PAGES + 1):
-                url = make_url(query, page_num)
-                print(f"  Страница {page_num}... ", end="", flush=True)
-                items = await parse_page(page, url, context)
-                print(f"Найдено: {len(items)}")
-                
-                if len(items) == 0:
-                    empty_attempts += 1
-                    # Если подряд 2 пустые страницы — значит точно всё, выходим
-                    if empty_attempts >= 2: 
-                        print("  🛑 Пустые страницы, идем дальше.")
-                        break 
-                else:
-                    all_items.extend(items)
-                    empty_attempts = 0 # Сбрасываем счетчик, если нашли товар
-                
-                await asyncio.sleep(3) # Увеличим паузу, чтобы Авито меньше нас блокировал
-        
-        # --- ЭТАП 2: Анализ каждого объявления ---
-        filtered_items = []
-        if unique_items:
-            print("📝 Анализ: Скрытые дефекты, Доставка, Комплект, Рейтинг...")
-            for idx, item in enumerate(unique_items, 1):
-                print(f"  [{idx}/{len(unique_items)}] {item['title'][:20]}... ", end="", flush=True)
-                
-                details = await fetch_description(page, item["url"])
-                item.update(details)
-                
-                desc_lower = item["description"].lower()
-                title_lower = item["title"].lower()
-                
-                # 🛑 Фильтр скрытых проблем (скам и блокировки)
-                stop_issues = [
-                    "mdm", "мдм", "soft unlock", "софт анлок", "операторский", "демо", "demo", "att", "verizon",
-                    "вскрывался", "ремонтировался", "заменен", "менялся", "не работает отпечаток", "отвал", 
-                    "мерцает", "заблокирован", "icloud", "гугл аккаунт", "google аккаунт", "пятн", "требуется ремонт"
-                ]
-                if any(bad in desc_lower for bad in stop_issues):
-                    print("✕ (Отбраковано: Скрытый дефект/Блокировка)")
-                    continue
+            # --- ЭТАП 2: Анализ каждого объявления ---
+            filtered_items = []
+            if unique_items:
+                print(f"📝 Анализ ({len(unique_items)} объявл.): Скрытые дефекты, Доставка, Комплект, Рейтинг...")
+                for idx, item in enumerate(unique_items, 1):
+                    try:
+                        url = item["url"]
+                        if url in cache:
+                            # Используем кеш
+                            item.update(cache[url])
+                            cached_used += 1
+                            print(f"  [{idx}/{len(unique_items)}] {item['title'][:20]}... (из кеша)")
+                            filtered_items.append(item)
+                        else:
+                            print(f"  [{idx}/{len(unique_items)}] {item['title'][:20]}... ", end="", flush=True)
+                            details = await fetch_description(page, url)
+                            item.update(details)
+                            
+                            desc_lower = item.get("description", "").lower()
+                            title_lower = item.get("title", "").lower()
+                            
+                            # 🛑 Фильтр скрытых проблем
+                            stop_issues = [
+                                "mdm", "мдм", "soft unlock", "софт анлок", "операторский", "демо", "demo", "att", "verizon",
+                                "вскрывался", "ремонтировался", "заменен", "менялся", "не работает отпечаток", "отвал",
+                                "мерцает", "заблокирован", "icloud", "гугл аккаунт", "google аккаунт", "пятн", "требуется ремонт"
+                            ]
+                            if any(bad in desc_lower for bad in stop_issues):
+                                print("✕ (Скрытый дефект/Блокировка)")
+                                continue
 
-                # 🛑 Фильтр доставки (Только Ростов)
-                no_delivery = ["без доставки", "доставки нет", "авито доставки нет", "не отправляю", "только личная встреча", "не отправлю", "без пересыла"]
-                if any(word in desc_lower for word in no_delivery):
-                    if USER_CITY not in item["city"].lower():
-                        print("✕ (Отбраковано: Нет доставки, другой город)")
+                            if "только обмен" in desc_lower:
+                                print("✕ (Только обмен)")
+                                continue
+
+                            # 🛑 Фильтр доставки
+                            no_delivery = ["без доставки", "доставки нет", "авито доставки нет", "не отправляю", "только личная встреча", "не отправлю", "без пересыла"]
+                            if any(word in desc_lower for word in no_delivery):
+                                if USER_CITY not in item.get("city", "").lower():
+                                    print("✕ (Нет доставки, другой город)")
+                                    continue
+
+                            # 🛑 Фильтр состояния
+                            cond_lower = item.get("condition", "Не указано").lower()
+                            scr_lower = item.get("screen", "Не указано").lower()
+                            if cond_lower != "не указано" and not any(good in cond_lower for good in ["отлично", "хороше", "ново"]):
+                                print("✕ (Убитое состояние)")
+                                continue
+                            if scr_lower != "не указано" and not any(good in scr_lower for good in ["без дефект", "1-2", "1–2", "царапин"]):
+                                print("✕ (Разбитый экран)")
+                                continue
+
+                            # 🛑 Фильтр рейтинга
+                            rating = item.get("rating", 0.0)
+                            if rating > 0 and rating < 4.0:
+                                print("✕ (Низкий рейтинг)")
+                                continue
+
+                            # 🎁 Анализ комплекта
+                            if re.search(r'полный комплект|коробка|родная зарядка|ориг\w* блок', desc_lower):
+                                item["kit"] = "✅ Полный"
+                            else:
+                                item["kit"] = "❓ Уточнить"
+
+                            # 🏆 Расчет оценки
+                            score = 0
+                            if item.get("condition") == "Отличное" and item.get("screen") == "Без дефектов":
+                                score += 3
+                            if item.get("kit") == "✅ Полный":
+                                score += 2
+                            
+                            jackpots = [
+                                r'(nothing|phone)\s*(4\s*a|4\s*pro)\b',
+                                r'(pixel|пиксель)\s*(9\s*pro|9pro)\b',
+                                r'(edge 60|s60|edge 70)',
+                                r'(oneplus|ванплас)\s+(12|12r|nord 4|nord 5|ace 3 pro)\b'
+                            ]
+                            if any(re.search(j, title_lower) for j in jackpots):
+                                score += 5
+                            
+                            item["score"] = score
+                            print(f"✅ Оценка: {score}")
+                            filtered_items.append(item)
+                            cache[url] = item.copy()
+                            new_added += 1
+                            await asyncio.sleep(3)
+                    except Exception as e:
+                        print(f"  ⚠ Ошибка при анализе {item.get('url')}: {e}")
                         continue
+            
+            await browser.close()
+        
+        # Prune cache
+        current_urls = {it["url"] for it in unique_items}
+        stale_keys = [k for k in list(cache.keys()) if k not in current_urls]
+        for k in stale_keys:
+            del cache[k]
+        
+        save_cache(cache)
+        print(f"🗂️ Кеш обновлен: {len(cache)} объявлений (использовано {cached_used}, новых {new_added})")
 
-                # 🛑 Фильтр убитого состояния
-                cond_lower = item["condition"].lower()
-                scr_lower = item["screen"].lower()
-                if cond_lower != "не указано" and not any(good in cond_lower for good in ["отлично", "хороше", "ново"]):
-                    print("✕ (Убитое состояние)")
-                    continue
-                if scr_lower != "не указано" and not any(good in scr_lower for good in ["без дефект", "1-2", "1–2", "царапин"]):
-                    print("✕ (Разбитый экран)")
-                    continue
+        if filtered_items:
+            filtered_items.sort(key=lambda x: (-x.get("score", 0), x.get("price", 0)))
+            total = save_to_excel(filtered_items, OUTPUT_FILE)
+            print(f"\n✨ Готово! Сохранено {total} предложений в {OUTPUT_FILE}")
+        else:
+            print("\n⚠ Подходящих предложений не найдено.")
+    except Exception as e:
+        print(f"\n❌ Критическая ошибка в работе парсера: {e}")
 
-                # 🛑 Фильтр рейтинга (менее 4.0 - в мусор)
-                if item["rating"] > 0 and item["rating"] < 4.0:
-                    print("✕ (Плохой продавец, рейтинг ниже 4.0)")
-                    continue
-
-                # 🎁 Анализ комплекта
-                if re.search(r'полный комплект|коробка|родная зарядка|ориг\w* блок', desc_lower):
-                    item["kit"] = "✅ Полный"
-                else:
-                    item["kit"] = "❓ Уточнить"
-
-                # 🏆 Расчет умной оценки (Скоринг)
-                score = 0
-                if item["condition"] == "Отличное" and item["screen"] == "Без дефектов": score += 3
-                if item["kit"] == "✅ Полный": score += 2
-                
-                # ДЖЕКПОТЫ (+5 БАЛЛОВ) за самые топовые модели
-                jackpots = [
-                    r'(nothing|phone)\s*\(?(4\s*a|4\s*pro)\b',
-                    r'(pixel|пиксель)\s*(9\s*pro|9pro)\b',
-                    r'(edge 60|s60|edge 70)',
-                    r'(oneplus|ванплас)\s+(12|12r|nord 4|nord 5|ace 3 pro)\b'
-                ]
-                if any(re.search(j, title_lower) for j in jackpots):
-                    score += 5
-                
-                item["score"] = score
-                print(f"✅ Оценка: {score} | АКБ: {item['battery']}")
-                filtered_items.append(item)
-                await asyncio.sleep(3)
-
-        await browser.close()
-
-    # Финальная сортировка и сохранение
-    if filtered_items:
-        filtered_items.sort(key=lambda x: (-x["score"], x["price"]))
-        total = save_to_excel(filtered_items, OUTPUT_FILE)
-        print(f"\n✨ Готово! В {OUTPUT_FILE} сохранено {total} топовых предложений.")
-    else:
-        print("\n⚠ Ничего не найдено.")
 
 if __name__ == "__main__":
     asyncio.run(main())
