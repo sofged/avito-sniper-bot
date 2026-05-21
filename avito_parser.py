@@ -521,3 +521,6 @@ async def main():
             print("\n⚠ Подходящих предложений не найдено.")
     except Exception as e:
         print(f"\n❌ Критическая ошибка в работе парсера: {e}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
