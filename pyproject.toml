@@ -1,0 +1,6 @@
+[tool.taskipy.tasks]
+test = "python -m pytest tests/test_parser.py -v"
+
+start = "python avito_parser.py"
+
+# linter = "python -m flake8 ."
