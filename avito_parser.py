@@ -186,7 +186,8 @@ async def parse_page(page, url: str, context) -> list[dict]:
             STOP_WORDS = [
                 "чехол", "коробка", "аккумулятор", "акб", "дисплей", "экран", "стекло", "камера",
                 "плата", "запчасти", "на запчасти", "шлейф", "корпус", "динамик", "зарядка", 
-                "ремонт", "наушники", "watch", "buds", "часы", "разбит", "трещина", "выгорание"
+                "ремонт", "наушники", "watch", "buds", "часы", "разбит", "трещина", "выгорание",
+                "кейс", "бампер", "кулер", "защитное", "кабель", "провод", "блок питания"
             ]
             
             title_lower = title.lower()
@@ -198,8 +199,10 @@ async def parse_page(page, url: str, context) -> list[dict]:
             # 1. Nothing Phone
             if "nothing" in title_lower or "phone" in title_lower:
                 if " 1 " in title_lower or "cmf" in title_lower: pass 
-                elif re.search(r'(nothing|phone)\s*\(?(2|2\s*a|2\s*pro|2pro|3|3\s*a|3\s*pro|3pro|4\s*a|4\s*pro|4pro)\b', title_lower):
-                    is_valid_model = True
+                # Убрали 2a и 2 pro, оставили 2, 3, 4 и их вариации (кроме 2a/2pro)
+                elif re.search(r'(nothing|phone)\s*\(?(2|3|3\s*a|3\s*pro|4|4\s*a|4\s*pro)\b', title_lower):
+                    if not re.search(r'2\s*a|2\s*pro', title_lower):
+                        is_valid_model = True
             
             # 2. Google Pixel
             elif "pixel" in title_lower or "пиксель" in title_lower:
@@ -209,11 +212,14 @@ async def parse_page(page, url: str, context) -> list[dict]:
             # 3. Motorola
             elif any(brand in title_lower for brand in ["motorola", "moto", "моторола"]):
                 allowed_moto = [
-                    r"edge\s*30\s*pro", r"edge\s*x30", r"edge\s*40", r"\bx\s*40\b", r"\bs\s*30\b", 
-                    r"\bs\s*50\b", r"\bs\s*60\b", r"edge\s*50", r"edge\s*20\s*pro", r"edge\s*60", r"edge\s*70"
+                    r"edge\s*40", r"edge\s*50", r"edge\s*60", r"edge\s*70",
+                    r"\bx\s*40\b", r"\bs\s*30\b", r"\bs\s*50\b", r"\bs\s*60\b",
+                    r"edge\s*x30"
                 ]
                 if any(re.search(m, title_lower) for m in allowed_moto):
-                    is_valid_model = True
+                    # Исключаем 20 и 30 серии (включая pro)
+                    if not re.search(r'edge\s*(20|30)', title_lower):
+                        is_valid_model = True
 
             # 4. OnePlus
             elif "oneplus" in title_lower or "ванплас" in title_lower:
@@ -366,7 +372,7 @@ async def main():
                         
                         if not items:
                             empty_attempts += 1
-                            if empty_attempts >= 3:
+                            if empty_attempts >= 4:
                                 print("  🛑 Пустые страницы, переходим к следующему запросу.")
                                 break
                         else:
@@ -388,69 +394,86 @@ async def main():
             
             # --- ЭТАП 2: Анализ каждого объявления ---
             filtered_items = []
+            seen_content = set() # Для удаления дублей по тексту описания
+            
             if unique_items:
                 print(f"📝 Анализ ({len(unique_items)} объявл.): Скрытые дефекты, Доставка, Комплект, Рейтинг...")
                 for idx, item in enumerate(unique_items, 1):
                     try:
                         url = item["url"]
+                        is_from_cache = False
+                        
                         if url in cache:
-                            # Используем кеш
                             item.update(cache[url])
-                            cached_used += 1
-                            print(f"  [{idx}/{len(unique_items)}] {item['title'][:20]}... (из кеша)")
-                            filtered_items.append(item)
+                            is_from_cache = True
                         else:
                             print(f"  [{idx}/{len(unique_items)}] {item['title'][:20]}... ", end="", flush=True)
                             details = await fetch_description(page, url)
                             item.update(details)
-                            
-                            desc_lower = item.get("description", "").lower()
-                            title_lower = item.get("title", "").lower()
-                            
-                            # 🛑 Фильтр скрытых проблем
-                            stop_issues = [
-                                "mdm", "мдм", "soft unlock", "софт анлок", "операторский", "демо", "demo", "att", "verizon",
-                                "вскрывался", "ремонтировался", "заменен", "менялся", "не работает отпечаток", "отвал",
-                                "мерцает", "заблокирован", "icloud", "гугл аккаунт", "google аккаунт", "пятн", "требуется ремонт"
-                            ]
-                            if any(bad in desc_lower for bad in stop_issues):
-                                print("✕ (Скрытый дефект/Блокировка)")
+                            await asyncio.sleep(3)
+                        
+                        # --- ПРОВЕРКА НА ДУБЛИКАТЫ ПО КОНТЕНТУ ---
+                        content_key = f"{item.get('title', '')}|{item.get('description', '')}".strip().lower()
+                        if content_key in seen_content:
+                            if not is_from_cache: print("✕ (Дубликат по описанию)")
+                            continue
+                        seen_content.add(content_key)
+
+                        # --- ФИЛЬТРЫ (применяем ко всем, даже к кешу) ---
+                        desc_lower = item.get("description", "").lower()
+                        title_lower = item.get("title", "").lower()
+                        
+                        # 1. Повторная проверка стоп-слов в названии
+                        STOP_WORDS_EXTRA = ["кейс", "бампер", "кулер", "защитное", "кабель", "провод", "блок питания", "дисплей", "экран"]
+                        if any(w in title_lower for w in STOP_WORDS_EXTRA):
+                            if not is_from_cache: print("✕ (Аксессуар/Запчасть)")
+                            continue
+
+                        # 🛑 Фильтр скрытых проблем
+                        stop_issues = [
+                            "mdm", "мдм", "soft unlock", "софт анлок", "операторский", "демо", "demo", "att", "verizon",
+                            "вскрывался", "ремонтировался", "заменен", "менялся", "не работает отпечаток", "отвал",
+                            "мерцает", "заблокирован", "icloud", "гугл аккаунт", "google аккаунт", "пятн", "требуется ремонт"
+                        ]
+                        if any(bad in desc_lower for bad in stop_issues):
+                            if not is_from_cache: print("✕ (Скрытый дефект/Блокировка)")
+                            continue
+
+                        if "только обмен" in desc_lower:
+                            if not is_from_cache: print("✕ (Только обмен)")
+                            continue
+
+                        # 🛑 Фильтр доставки
+                        no_delivery = ["без доставки", "доставки нет", "авито доставки нет", "не отправляю", "только личная встреча", "не отправлю", "без пересыла"]
+                        if any(word in desc_lower for word in no_delivery):
+                            if USER_CITY not in item.get("city", "").lower():
+                                if not is_from_cache: print("✕ (Нет доставки, другой город)")
                                 continue
 
-                            if "только обмен" in desc_lower:
-                                print("✕ (Только обмен)")
-                                continue
+                        # 🛑 Фильтр состояния
+                        cond_lower = item.get("condition", "Не указано").lower()
+                        scr_lower = item.get("screen", "Не указано").lower()
+                        if cond_lower != "не указано" and not any(good in cond_lower for good in ["отлично", "хороше", "ново"]):
+                            if not is_from_cache: print("✕ (Убитое состояние)")
+                            continue
+                        if scr_lower != "не указано" and not any(good in scr_lower for good in ["без дефект", "1-2", "1–2", "царапин"]):
+                            if not is_from_cache: print("✕ (Разбитый экран)")
+                            continue
 
-                            # 🛑 Фильтр доставки
-                            no_delivery = ["без доставки", "доставки нет", "авито доставки нет", "не отправляю", "только личная встреча", "не отправлю", "без пересыла"]
-                            if any(word in desc_lower for word in no_delivery):
-                                if USER_CITY not in item.get("city", "").lower():
-                                    print("✕ (Нет доставки, другой город)")
-                                    continue
+                        # 🛑 Фильтр рейтинга
+                        rating = item.get("rating", 0.0)
+                        if rating > 0 and rating < 4.0:
+                            if not is_from_cache: print("✕ (Низкий рейтинг)")
+                            continue
 
-                            # 🛑 Фильтр состояния
-                            cond_lower = item.get("condition", "Не указано").lower()
-                            scr_lower = item.get("screen", "Не указано").lower()
-                            if cond_lower != "не указано" and not any(good in cond_lower for good in ["отлично", "хороше", "ново"]):
-                                print("✕ (Убитое состояние)")
-                                continue
-                            if scr_lower != "не указано" and not any(good in scr_lower for good in ["без дефект", "1-2", "1–2", "царапин"]):
-                                print("✕ (Разбитый экран)")
-                                continue
-
-                            # 🛑 Фильтр рейтинга
-                            rating = item.get("rating", 0.0)
-                            if rating > 0 and rating < 4.0:
-                                print("✕ (Низкий рейтинг)")
-                                continue
-
+                        # 🏆 Расчет оценки (если не из кеша или пересчитываем)
+                        if not is_from_cache:
                             # 🎁 Анализ комплекта
                             if re.search(r'полный комплект|коробка|родная зарядка|ориг\w* блок', desc_lower):
                                 item["kit"] = "✅ Полный"
                             else:
                                 item["kit"] = "❓ Уточнить"
 
-                            # 🏆 Расчет оценки
                             score = 0
                             if item.get("condition") == "Отличное" and item.get("screen") == "Без дефектов":
                                 score += 3
@@ -468,10 +491,13 @@ async def main():
                             
                             item["score"] = score
                             print(f"✅ Оценка: {score}")
-                            filtered_items.append(item)
                             cache[url] = item.copy()
                             new_added += 1
-                            await asyncio.sleep(3)
+                        else:
+                            cached_used += 1
+                            print(f"  [{idx}/{len(unique_items)}] {item['title'][:20]}... (из кеша)")
+
+                        filtered_items.append(item)
                     except Exception as e:
                         print(f"  ⚠ Ошибка при анализе {item.get('url')}: {e}")
                         continue
@@ -495,7 +521,3 @@ async def main():
             print("\n⚠ Подходящих предложений не найдено.")
     except Exception as e:
         print(f"\n❌ Критическая ошибка в работе парсера: {e}")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
