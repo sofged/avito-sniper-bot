@@ -10,7 +10,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 # ==========================================
 PRICE_MIN = 7000          
 PRICE_MAX = 14000         
-MAX_PAGES  = 10           
+MAX_PAGES  = 100           
 OUTPUT_FILE = "avito_results.xlsx" 
 USER_CITY = "ростов-на-дону"       
 
