@@ -16,7 +16,7 @@ MAX_PAGES  = 20
 OUTPUT_FILE = "avito_results.xlsx" 
 USER_CITY = "ростов-на-дону"
 
-# Cache configuration
+# Конфигурация кэша
 CACHE_FILE = "avito_cache.json"
 
 def load_cache() -> dict:
@@ -379,6 +379,10 @@ async def main():
                     if any(bad in desc_lower for bad in stop_issues):
                         print("✕ (Отбраковано: Скрытый дефект/Блокировка)")
                         continue
+                    # Дополнительная проверка: исключаем объявления с пометкой "Только обмен"
+                    if "только обмен" in desc_lower:
+                        print("✕ (Отбраковано: Только обмен)")
+                        continue
 
                     # 🛑 Фильтр доставки (Только Ростов)
                     no_delivery = ["без доставки", "доставки нет", "авито доставки нет", "не отправляю", "только личная встреча", "не отправлю", "без пересыла"]
@@ -452,9 +456,9 @@ async def main():
         print("\n⚠ Ничего не найдено.")
 
 
-    asyncio.run(main())
-    all_items = []
-    print("🚀 Запуск парсера: СНАЙПЕРСКИЙ РЕЖИМ (С ОЦЕНКАМИ)")
+
+
+    
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled"])
