@@ -1,5 +1,7 @@
 import asyncio
 import re
+import json
+import os
 from urllib.parse import urlencode
 from playwright.async_api import async_playwright
 from openpyxl import Workbook
@@ -10,9 +12,27 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 # ==========================================
 PRICE_MIN = 7000          
 PRICE_MAX = 14000         
-MAX_PAGES  = 100           
+MAX_PAGES  = 20           
 OUTPUT_FILE = "avito_results.xlsx" 
-USER_CITY = "ростов-на-дону"       
+USER_CITY = "ростов-на-дону"
+
+# Cache configuration
+CACHE_FILE = "avito_cache.json"
+
+def load_cache() -> dict:
+    """Load cached ad details from CACHE_FILE if it exists."""
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_cache(cache: dict) -> None:
+    """Persist the cache dictionary to CACHE_FILE."""
+    with open(CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False, indent=2)       
 
 SEARCH_QUERIES = [
     "motorola",
@@ -45,13 +65,13 @@ async def fetch_description(page, url: str) -> dict:
     
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=15_000)
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(3)
         
         # Если вылезла капча - ждем, пока пользователь ее решит руками
         if await is_captcha_page(page):
             print(f"\n⚠ Капча при переходе. Реши в браузере...")
             for _ in range(60):
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
                 if not await is_captcha_page(page): break
             else:
                 result["description"] = "Капча при загрузке"
@@ -105,7 +125,7 @@ async def fetch_description(page, url: str) -> dict:
 async def parse_page(page, url: str, context) -> list[dict]:
     """Сканирует общую страницу поиска, собирает карточки товаров и делает первичный фильтр."""
     await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-    await asyncio.sleep(1.5)
+    await asyncio.sleep(3)
 
     if await is_captcha_page(page): return []
 
@@ -170,7 +190,8 @@ async def parse_page(page, url: str, context) -> list[dict]:
 
             # 4. OnePlus (Добавил \s* для Nord, Ace и моделей)
             elif "oneplus" in title_lower or "ванплас" in title_lower:
-                op_regex = r'(oneplus|ванплас)\s+(11\s*r|12|12\s*r|nord\s*3|nord\s*4|nord\s*5|ace\s*2|ace\s*3|nord\s*ce\s*3)\b'
+                # Замени в функции parse_page:
+                op_regex = r'(oneplus|ванплас)\s+(11\s*r|12|12\s*r|nord\s*3|nord\s*4|nord\s*5|ace\s*2|ace\s*2\s*pro|ace\s*2\s*v|ace\s*3|ace\s*3\s*v|ace\s*3\s*pro|nord\s*ce\s*3)\b'
                 if re.search(op_regex, title_lower):
                     is_valid_model = True
             
@@ -286,6 +307,155 @@ async def main():
     all_items = []
     print("🚀 Запуск парсера: СНАЙПЕРСКИЙ РЕЖИМ (С ОЦЕНКАМИ)")
 
+    # Load cache
+    cache = load_cache()
+    cached_used = 0
+    new_added = 0
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled"])
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            locale="ru-RU", viewport={"width": 1366, "height": 900})
+        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
+        page = await context.new_page()
+
+        # --- ЭТАП 1: СБОР ССЫЛОК СО СТРАНИЦ ПОИСКА ---
+        for query in SEARCH_QUERIES:
+            print(f"\n🔍 Поиск: «{query}»")
+            empty_attempts = 0
+            
+            for page_num in range(1, MAX_PAGES + 1):
+                url = make_url(query, page_num)
+                print(f"  Страница {page_num}... ", end="", flush=True)
+                items = await parse_page(page, url, context)
+                print(f"Найдено: {len(items)}")
+                
+                if len(items) == 0:
+                    empty_attempts += 1
+                    if empty_attempts >= 2:
+                        print("  🛑 Пустые страницы, идем дальше.")
+                        break
+                else:
+                    all_items.extend(items)
+                    empty_attempts = 0
+                
+                await asyncio.sleep(3)
+        
+        # --- ЭТАП 2: Анализ каждого объявления ---
+        filtered_items = []
+        # Deduplicate items by URL
+        seen = set()
+        unique_items = []
+        for it in all_items:
+            if it["url"] not in seen:
+                seen.add(it["url"])                
+                unique_items.append(it)
+        
+        if unique_items:
+            print("📝 Анализ: Скрытые дефекты, Доставка, Комплект, Рейтинг...")
+            for idx, item in enumerate(unique_items, 1):
+                url = item["url"]
+                if url in cache:
+                    # Use cached data
+                    cached_item = cache[url]
+                    item.update(cached_item)
+                    cached_used += 1
+                    print(f"  [{idx}/{len(unique_items)}] {item['title'][:20]}... (cached)")
+                else:
+                    print(f"  [{idx}/{len(unique_items)}] {item['title'][:20]}... ", end="", flush=True)
+                    details = await fetch_description(page, url)
+                    item.update(details)
+                    
+                    desc_lower = item["description"].lower()
+                    title_lower = item["title"].lower()
+                    
+                    # 🛑 Фильтр скрытых проблем (скам и блокировки)
+                    stop_issues = [
+                        "mdm", "мдм", "soft unlock", "софт анлок", "операторский", "демо", "demo", "att", "verizon",
+                        "вскрывался", "ремонтировался", "заменен", "менялся", "не работает отпечаток", "отвал",
+                        "мерцает", "заблокирован", "icloud", "гугл аккаунт", "google аккаунт", "пятн", "требуется ремонт"
+                    ]
+                    if any(bad in desc_lower for bad in stop_issues):
+                        print("✕ (Отбраковано: Скрытый дефект/Блокировка)")
+                        continue
+
+                    # 🛑 Фильтр доставки (Только Ростов)
+                    no_delivery = ["без доставки", "доставки нет", "авито доставки нет", "не отправляю", "только личная встреча", "не отправлю", "без пересыла"]
+                    if any(word in desc_lower for word in no_delivery):
+                        if USER_CITY not in item["city"].lower():
+                            print("✕ (Отбраковано: Нет доставки, другой город)")
+                            continue
+
+                    # 🛑 Фильтр убитого состояния
+                    cond_lower = item["condition"].lower()
+                    scr_lower = item["screen"].lower()
+                    if cond_lower != "не указано" and not any(good in cond_lower for good in ["отлично", "хороше", "ново"]):
+                        print("✕ (Убитое состояние)")
+                        continue
+                    if scr_lower != "не указано" and not any(good in scr_lower for good in ["без дефект", "1-2", "1–2", "царапин"]):
+                        print("✕ (Разбитый экран)")
+                        continue
+
+                    # 🛑 Фильтр рейтинга (менее 4.0)
+                    if item["rating"] > 0 and item["rating"] < 4.0:
+                        print("✕ (Плохой продавец, рейтинг ниже 4.0)")
+                        continue
+
+                    # 🎁 Анализ комплекта
+                    if re.search(r'полный комплект|коробка|родная зарядка|ориг\\w* блок', desc_lower):
+                        item["kit"] = "✅ Полный"
+                    else:
+                        item["kit"] = "❓ Уточнить"
+
+                    # 🏆 Расчет умной оценки (Скоринг)
+                    score = 0
+                    if item["condition"] == "Отличное" and item["screen"] == "Без дефектов":
+                        score += 3
+                    if item["kit"] == "✅ Полный":
+                        score += 2
+                    
+                    # ДЖЕКПОТЫ (+5 баллов)
+                    jackpots = [
+                        r'(nothing|phone)\\s*\\(?(4\\s*a|4\\s*pro)\\b',
+                        r'(pixel|пиксель)\\s*(9\\s*pro|9pro)\\b',
+                        r'(edge 60|s60|edge 70)',
+                        r'(oneplus|ванплас)\\s+(12|12r|nord 4|nord 5|ace 3 pro)\\b'
+                    ]
+                    if any(re.search(j, title_lower) for j in jackpots):
+                        score += 5
+                    
+                    item["score"] = score
+                    print(f"✅ Оценка: {score} | АКБ: {item['battery']}")
+                    filtered_items.append(item)
+                    cache[url] = item.copy()
+                    new_added += 1
+                    await asyncio.sleep(3)
+        
+        await browser.close()
+    
+    # Prune stale cache entries (remove URLs no longer present)
+    current_urls = {it["url"] for it in all_items}
+    stale_keys = [k for k in list(cache.keys()) if k not in current_urls]
+    for k in stale_keys:
+        del cache[k]
+    
+    save_cache(cache)
+    print(f"🗂️ Кешировано объявлений: {len(cache)} (использовано {cached_used}, новые {new_added})")
+
+    # Финальная сортировка и сохранение
+    if filtered_items:
+        filtered_items.sort(key=lambda x: (-x["score"], x["price"]))
+        total = save_to_excel(filtered_items, OUTPUT_FILE)
+        print(f"\n✨ Готово! В {OUTPUT_FILE} сохранено {total} топовых предложений.")
+    else:
+        print("\n⚠ Ничего не найдено.")
+
+
+    asyncio.run(main())
+    all_items = []
+    print("🚀 Запуск парсера: СНАЙПЕРСКИЙ РЕЖИМ (С ОЦЕНКАМИ)")
+
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled"])
         context = await browser.new_context(
@@ -315,7 +485,7 @@ async def main():
                     all_items.extend(items)
                     empty_attempts = 0 # Сбрасываем счетчик, если нашли товар
                 
-                await asyncio.sleep(2) # Увеличим паузу, чтобы Авито меньше нас блокировал
+                await asyncio.sleep(3) # Увеличим паузу, чтобы Авито меньше нас блокировал
         
         # --- ЭТАП 2: Анализ каждого объявления ---
         filtered_items = []
@@ -378,7 +548,7 @@ async def main():
                     r'(nothing|phone)\s*\(?(4\s*a|4\s*pro)\b',
                     r'(pixel|пиксель)\s*(9\s*pro|9pro)\b',
                     r'(edge 60|s60|edge 70)',
-                    r'(oneplus|ванплас)\s+(12|12r|nord 4|nord 5|ace 3)\b'
+                    r'(oneplus|ванплас)\s+(12|12r|nord 4|nord 5|ace 3 pro)\b'
                 ]
                 if any(re.search(j, title_lower) for j in jackpots):
                     score += 5
@@ -386,7 +556,7 @@ async def main():
                 item["score"] = score
                 print(f"✅ Оценка: {score} | АКБ: {item['battery']}")
                 filtered_items.append(item)
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(3)
 
         await browser.close()
 
