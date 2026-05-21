@@ -147,25 +147,30 @@ async def parse_page(page, url: str, context) -> list[dict]:
             # Строгий фильтр по нужным моделям телефонов
             is_valid_model = False
             
+            # 1. Nothing Phone (Ловит слитное и раздельное написание)
             if "nothing" in title_lower or "phone" in title_lower:
                 if " 1 " in title_lower or "cmf" in title_lower: pass 
-                elif re.search(r'(nothing|phone)\s*\(?(2|2a|2\s*pro|2pro|3|3a|3\s*pro|3pro)\b', title_lower):
+                # \s* позволяет пропускать пробелы внутри моделей: "2a" == "2 a"
+                elif re.search(r'(nothing|phone)\s*\(?(2|2\s*a|2\s*pro|2pro|3|3\s*a|3\s*pro|3pro|4\s*a|4\s*pro|4pro)\b', title_lower):
                     is_valid_model = True
             
+            # 2. Google Pixel
             elif "pixel" in title_lower or "пиксель" in title_lower:
-                if re.search(r'(pixel|пиксель)\s*(8|9|9\s*pro|9pro)\b', title_lower):
+                if re.search(r'(pixel|пиксель)\s*(8|9|9\s*pro|9pro|9\s*a|9a)\b', title_lower):
                     is_valid_model = True
             
+            # 3. Motorola (Добавил \s* во все модели)
             elif any(brand in title_lower for brand in ["motorola", "moto", "моторола"]):
                 allowed_moto = [
-                    r"edge 30 pro", r"edge x30", r"edge 40\b", r"\bx40\b", r"\bs30\b", 
-                    r"\bs50\b", r"\bs60\b", r"edge 50", r"edge 20 pro", r"edge 60", r"edge 70"
+                    r"edge\s*30\s*pro", r"edge\s*x30", r"edge\s*40", r"\bx\s*40\b", r"\bs\s*30\b", 
+                    r"\bs\s*50\b", r"\bs\s*60\b", r"edge\s*50", r"edge\s*20\s*pro", r"edge\s*60", r"edge\s*70"
                 ]
                 if any(re.search(m, title_lower) for m in allowed_moto):
                     is_valid_model = True
 
+            # 4. OnePlus (Добавил \s* для Nord, Ace и моделей)
             elif "oneplus" in title_lower or "ванплас" in title_lower:
-                op_regex = r'(oneplus|ванплас)\s+(11r|12|12r|nord 3|nord 4|nord 5|ace 2|ace 3|nord ce\s*3)\b'
+                op_regex = r'(oneplus|ванплас)\s+(11\s*r|12|12\s*r|nord\s*3|nord\s*4|nord\s*5|ace\s*2|ace\s*3|nord\s*ce\s*3)\b'
                 if re.search(op_regex, title_lower):
                     is_valid_model = True
             
@@ -360,9 +365,9 @@ async def main():
                 if item["condition"] == "Отличное" and item["screen"] == "Без дефектов": score += 3
                 if item["kit"] == "✅ Полный": score += 2
                 
-                # Джекпоты (+5 баллов)
+                # ДЖЕКПОТЫ (+5 БАЛЛОВ) за самые топовые модели
                 jackpots = [
-                    r'(nothing|phone)\s*\(?(3a|3\s*pro|3pro)\b',
+                    r'(nothing|phone)\s*\(?(4\s*a|4\s*pro)\b',
                     r'(pixel|пиксель)\s*(9\s*pro|9pro)\b',
                     r'(edge 60|s60|edge 70)',
                     r'(oneplus|ванплас)\s+(12|12r|nord 4|nord 5|ace 3)\b'
