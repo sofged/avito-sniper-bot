@@ -421,7 +421,7 @@ async def main():
                     
                     # ДЖЕКПОТЫ (+5 баллов)
                     jackpots = [
-                        r'(nothing|phone)\\s*\\(?(4\\s*a|4\\s*pro)\\b',
+                        r'(nothing|phone)\s*(4\s*a|4\s*pro)\b',
                         r'(pixel|пиксель)\\s*(9\\s*pro|9pro)\\b',
                         r'(edge 60|s60|edge 70)',
                         r'(oneplus|ванплас)\\s+(12|12r|nord 4|nord 5|ace 3 pro)\\b'
