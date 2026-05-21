@@ -294,20 +294,28 @@ async def main():
         await context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
         page = await context.new_page()
 
-        # --- ЭТАП 1: Сбор ссылок ---
+        # --- ЭТАП 1: СБОР ССЫЛОК СО СТРАНИЦ ПОИСКА ---
         for query in SEARCH_QUERIES:
             print(f"\n🔍 Поиск: «{query}»")
+            empty_attempts = 0 # Счетчик пустых страниц
+            
             for page_num in range(1, MAX_PAGES + 1):
                 url = make_url(query, page_num)
                 print(f"  Страница {page_num}... ", end="", flush=True)
                 items = await parse_page(page, url, context)
                 print(f"Найдено: {len(items)}")
-                all_items.extend(items)
-                if len(items) == 0: break  
-                await asyncio.sleep(1.5)
-
-        unique_items = list({item["url"]: item for item in all_items}.values())
-        print(f"\n📊 Уникальных кандидатов: {len(unique_items)}")
+                
+                if len(items) == 0:
+                    empty_attempts += 1
+                    # Если подряд 2 пустые страницы — значит точно всё, выходим
+                    if empty_attempts >= 2: 
+                        print("  🛑 Пустые страницы, идем дальше.")
+                        break 
+                else:
+                    all_items.extend(items)
+                    empty_attempts = 0 # Сбрасываем счетчик, если нашли товар
+                
+                await asyncio.sleep(2) # Увеличим паузу, чтобы Авито меньше нас блокировал
         
         # --- ЭТАП 2: Анализ каждого объявления ---
         filtered_items = []
