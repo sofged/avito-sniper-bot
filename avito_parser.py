@@ -199,10 +199,10 @@ async def parse_page(page, url: str, context, page_num: int) -> list[dict]:
             
             # 1. Nothing Phone
             if "nothing" in title_lower or "phone" in title_lower:
-                if " 1 " in title_lower or "cmf" in title_lower: pass 
-                # Убрали 2a и 2 pro, оставили 2, 3, 4 и их вариации (кроме 2a/2pro)
-                elif re.search(r'(nothing|phone)\s*\(?(2|3|3\s*a|3\s*pro|4|4\s*a|4\s*pro)\b', title_lower):
-                    if not re.search(r'2\s*a|2\s*pro', title_lower):
+                if "cmf" in title_lower or "lite" in title_lower: pass 
+                # Убрали 2a и 2 pro, оставили 2, 3, 4 и их вариации
+                elif re.search(r'(nothing|phone)\s*\(?(2|3|4)\b', title_lower):
+                    if not re.search(r'2\s*a|2\s*pro|lite', title_lower):
                         is_valid_model = True
             
             # 2. Google Pixel
@@ -214,19 +214,22 @@ async def parse_page(page, url: str, context, page_num: int) -> list[dict]:
             elif any(brand in title_lower for brand in ["motorola", "moto", "моторола"]):
                 allowed_moto = [
                     r"edge\s*40", r"edge\s*50", r"edge\s*60", r"edge\s*70",
-                    r"\bx\s*40\b", r"\bs\s*30\b", r"\bs\s*50\b", r"\bs\s*60\b",
+                    r"\bx\s*40\b", r"\bs\s*50\b", r"\bs\s*60\b",
                     r"edge\s*x30"
                 ]
                 if any(re.search(m, title_lower) for m in allowed_moto):
-                    # Исключаем 20 и 30 серии (включая pro)
-                    if not re.search(r'edge\s*(20|30)', title_lower):
+                    # Исключаем 20, 30 серии и модель S30
+                    if not re.search(r'edge\s*(20|30)|s\s*30', title_lower):
                         is_valid_model = True
 
             # 4. OnePlus
             elif "oneplus" in title_lower or "ванплас" in title_lower:
-                op_regex = r'(oneplus|ванплас)\s+(11\s*r|12|12\s*r|nord\s*3|nord\s*4|nord\s*5|ace\s*2|ace\s*2\s*pro|ace\s*2\s*v|ace\s*3|ace\s*3\s*v|ace\s*3\s*pro|nord\s*ce\s*3)\b'
+                # Ищем 11, 11R, 12, 12R, Nord 3/4/5, Ace 2/3 и их Pro/V версии
+                op_regex = r'(oneplus|ванплас)\s+(11|11\s*r|12|12\s*r|nord\s*(3|4|5)|ace\s*(2|3))\b'
                 if re.search(op_regex, title_lower):
-                    is_valid_model = True
+                    # ИСКЛЮЧАЕМ Nord CE 3 и Lite версии
+                    if not re.search(r'ce\s*3|lite', title_lower):
+                        is_valid_model = True
             
             if not is_valid_model: continue
 
