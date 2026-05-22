@@ -50,7 +50,8 @@ def make_url(query: str, page: int = 1) -> str:
 
 async def is_captcha_page(page) -> bool:
     """Проверяет, не заблокировал ли нас Авито капчей (по заголовку страницы)."""
-    return "ограничен" in (await page.title()).lower()
+    title = (await page.title()).lower()
+    return "ограничен" in title or "робот" in title or "captcha" in title
 
 async def fetch_description(page, url: str) -> dict:
     """
@@ -121,7 +122,7 @@ async def fetch_description(page, url: str) -> dict:
     return result
 
 
-async def parse_page(page, url: str, context) -> list[dict]:
+async def parse_page(page, url: str, context, page_num: int) -> list[dict]:
     """Сканирует общую страницу поиска, собирает карточки товаров и делает первичный фильтр."""
     try:
         # Смягчаем условия загрузки: domcontentloaded быстрее, чем load
@@ -135,11 +136,11 @@ async def parse_page(page, url: str, context) -> list[dict]:
             
         await asyncio.sleep(2)
         
-        # Проверка: не перебросило ли нас на другую страницу
+        # Проверка: не перебросило ли нас на другую страницу (например, на первую страницу без p=)
         current_url = page.url
-        if "p=" in url and "p=" not in current_url and page.url != url:
-            if "/rossiya" in current_url:
-                 print(f"  ⚠ Авито сбросил пагинацию (перенаправил на {current_url})")
+        if f"p={page_num}" not in current_url and page_num > 1:
+            print(f"  ⚠ Авито сбросил пагинацию (перенаправил на {current_url})")
+            return None
     except Exception as e:
         print(f"  ⚠ Ошибка при загрузке {url}: {e}")
         # Если загрузка совсем упала, возвращаем пустой список
@@ -361,22 +362,47 @@ async def main():
             for query in SEARCH_QUERIES:
                 print(f"\n🔍 Поиск: «{query}»")
                 empty_attempts = 0
+                query_seen_ids = set() # Используем ID для детекции дублей
                 
                 for page_num in range(1, MAX_PAGES + 1):
                     try:
                         url = make_url(query, page_num)
                         print(f"  Страница {page_num}... ", end="", flush=True)
                         
-                        items = await parse_page(page, url, context)
-                        print(f"Найдено: {len(items)}")
+                        items = await parse_page(page, url, context, page_num)
                         
-                        if not items:
+                        # Если функция вернула None — это жесткий стоп (редирект пагинации)
+                        if items is None:
+                            break
+                        
+                        # Извлекаем ID из ссылок для точной дедупликации
+                        for it in items:
+                            match = re.search(r'_(\d+)$', it["url"].split("?")[0])
+                            it["id"] = match.group(1) if match else it["url"]
+
+                        new_items = [it for it in items if it["id"] not in query_seen_ids]
+                        
+                        if items:
+                            print(f"Найдено: {len(items)} (новых: {len(new_items)})")
+                            for it in new_items:
+                                query_seen_ids.add(it["id"])
+                            all_items.extend(new_items)
+                        else:
+                            print("Найдено: 0")
+
+                        # ЛОГИКА ОСТАНОВКИ
+                        if not new_items:
                             empty_attempts += 1
-                            if empty_attempts >= 4:
+                            
+                            # Если на странице есть результаты, но они все старые — это петля пагинации (Авито показывает одни и те же VIP-объявления)
+                            if items and len(items) > 0:
+                                print("  🛑 Повторяющиеся результаты (петля пагинации).")
+                                break
+                            
+                            if empty_attempts >= 20:
                                 print("  🛑 Пустые страницы, переходим к следующему запросу.")
                                 break
                         else:
-                            all_items.extend(items)
                             empty_attempts = 0
 
                         await asyncio.sleep(4) # Пауза между страницами
@@ -384,12 +410,12 @@ async def main():
                         print(f"  ⚠ Сбой на странице {page_num}: {e}")
                         continue
             
-            # Deduplicate items by URL
-            seen = set()
+            # Deduplicate items by URL (на всякий случай, если в разных запросах попались одинаковые ссылки)
             unique_items = []
+            seen_global = set()
             for it in all_items:
-                if it["url"] not in seen:
-                    seen.add(it["url"])                
+                if it["url"] not in seen_global:
+                    seen_global.add(it["url"])
                     unique_items.append(it)
             
             # --- ЭТАП 2: Анализ каждого объявления ---
@@ -413,11 +439,15 @@ async def main():
                             await asyncio.sleep(3)
                         
                         # --- ПРОВЕРКА НА ДУБЛИКАТЫ ПО КОНТЕНТУ ---
-                        content_key = f"{item.get('title', '')}|{item.get('description', '')}".strip().lower()
-                        if content_key in seen_content:
-                            if not is_from_cache: print("✕ (Дубликат по описанию)")
+                        desc_text = item.get("description", "").strip().lower()
+                        # Используем очищенный кусок описания для выявления шаблонов магазинов (игнорируя мелкие изменения)
+                        clean_desc = re.sub(r'\s+', '', desc_text[:400])
+                        
+                        if len(clean_desc) > 50 and clean_desc in seen_content:
+                            if not is_from_cache: print("✕ (Дубликат описания/Магазин-спам)")
                             continue
-                        seen_content.add(content_key)
+                        if len(clean_desc) > 50:
+                            seen_content.add(clean_desc)
 
                         # --- ФИЛЬТРЫ (применяем ко всем, даже к кешу) ---
                         desc_lower = item.get("description", "").lower()
