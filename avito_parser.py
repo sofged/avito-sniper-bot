@@ -214,12 +214,11 @@ async def parse_page(page, url: str, context, page_num: int) -> list[dict]:
             elif any(brand in title_lower for brand in ["motorola", "moto", "моторола"]):
                 allowed_moto = [
                     r"edge\s*40", r"edge\s*50", r"edge\s*60", r"edge\s*70",
-                    r"\bx\s*40\b", r"\bs\s*50\b", r"\bs\s*60\b",
-                    r"edge\s*x30"
+                    r"\bx\s*40\b", r"\bs\s*50\b", r"\bs\s*60\b"
                 ]
                 if any(re.search(m, title_lower) for m in allowed_moto):
-                    # Исключаем 20, 30 серии и модель S30
-                    if not re.search(r'edge\s*(20|30)|s\s*30', title_lower):
+                    # Исключаем 20, 30 серии, модель S30 и X30
+                    if not re.search(r'edge\s*(20|30)|s\s*30|x\s*30', title_lower):
                         is_valid_model = True
 
             # 4. OnePlus
