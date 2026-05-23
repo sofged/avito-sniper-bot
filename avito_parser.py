@@ -11,7 +11,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 # ⚙️ ОСНОВНЫЕ НАСТРОЙКИ
 # ==========================================
 PRICE_MIN = 7000          
-PRICE_MAX = 14000         
+PRICE_MAX = 15000         
 MAX_PAGES  = 50           
 OUTPUT_FILE = "avito_results.xlsx" 
 USER_CITY = "ростов-на-дону"
@@ -223,8 +223,9 @@ async def parse_page(page, url: str, context, page_num: int) -> list[dict]:
 
             # 4. OnePlus
             elif "oneplus" in title_lower or "ванплас" in title_lower:
-                # Ищем 11, 11R, 12, 12R, Nord 3/4/5, Ace 2/3 и их Pro/V версии
-                op_regex = r'(oneplus|ванплас)\s+(11|11\s*r|12|12\s*r|nord\s*(3|4|5)|ace\s*(2|3))\b'
+                # Ищем 11, 11R, 12, 12R, Nord 3/4/5, Ace 2/3/5 и их Pro/V версии
+                # Используем более гибкий поиск для Ace 2/3/5, чтобы ловить 2V, 3V, 5V, 2 Pro и т.д.
+                op_regex = r'(oneplus|ванплас)\s+(11\s*r?|12\s*r?|nord\s*[345]|ace\s*[235][rv\s]*|ace\s*[235]\s*pro)\b'
                 if re.search(op_regex, title_lower):
                     # ИСКЛЮЧАЕМ Nord CE 3 и Lite версии
                     if not re.search(r'ce\s*3|lite', title_lower):
